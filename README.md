@@ -1,107 +1,69 @@
-# imperial_ai
-# Black-Box Optimisation Capstone — Stage 2
+# Black-Box Optimisation (BBO) Capstone Project
 
-## Overview
+## Section 1: Project overview
 
-This repository documents my work on the **Black-Box Optimisation (BBO) challenge**, part of Imperial College Business School's Executive Programme in Machine Learning and AI. The goal is to find the maximum of eight unknown ("black-box") functions of increasing dimensionality, using **Bayesian optimisation** to select each new query point efficiently — without ever seeing the functions' underlying equations.
+This project tackles a **black-box optimisation (BBO)** challenge: finding the maximum of eight unknown functions, each of increasing input dimensionality (from 2D up to 8D), without ever seeing their underlying equations. Each function can only be queried once per week, so the challenge isn't just to find a good result eventually - it's to find one **efficiently**, using a principled strategy to decide where to look next given everything learned so far.
 
-Each week, I submit one new input point per function to a course portal. The portal evaluates the true (hidden) function at that point and returns the result, which is added to my growing dataset and used to inform the next query. This README documents Stage 2 of the project: my third round of queries, and the reasoning behind the modelling choices made so far.
+The high-level idea is one that comes up constantly in real-world machine learning and quantitative work: you often have a function you want to optimise (a model's validation accuracy, a pricing model's calibration error, a physical process's yield) but each evaluation is slow, expensive, or resource-constrained, so you can't brute-force a full grid search. Bayesian optimisation addresses exactly this by building a probabilistic model of the function from the data collected so far, and using that model to intelligently choose the next point to test - balancing the trade-off between exploring uncertain regions and exploiting regions already known to perform well.
 
-## Purpose
+This project is directly relevant to my current and future career. I work in pricing and optimisation technology in prime finance, where calibrating models against real, costly-to-obtain market and desk outcomes is structurally the same problem: I can't exhaustively test every parameter combination, and each real evaluation has a genuine cost. Beyond the immediate technical skills (Gaussian Processes, acquisition functions, candidate search strategies), the discipline this project builds - explicitly separating "what does my model currently believe" from "what should I do about that belief" - is a mental model I expect to carry directly into how I approach model calibration and experimentation more broadly, including as I look to move into more technical, trading-aligned roles.
 
-Real-world optimisation problems often involve functions that are expensive, slow, or impossible to evaluate exhaustively — tuning a machine learning model's hyperparameters, calibrating a financial pricing model, or optimising a physical experiment, for example. In these settings, you can't run a full grid search; every evaluation costs time, money, or computational resources.
+## Section 2: Inputs and outputs
 
-This project simulates that exact constraint: each of the 8 functions can only be queried once per week, so the objective isn't just to find good inputs — it's to find them **efficiently**, using a principled strategy to decide where to look next given everything learned so far.
+**Input:** for each function, a query point in the format `x1-x2-x3-...-xn`, where:
+- Each value `xi` is a number between 0 and 1
+- Each value is specified to exactly six decimal places
+- `n` matches that function's input dimensionality (ranging from 2 to 8 across the eight functions)
 
-## The eight functions
+Example, for a 2D function: `0.593220-0.881356`
+Example, for a 4D function: `0.406863-0.467406-0.429753-0.452384`
 
-| Function | Dimensions | Represents |
-|---|---|---|
-| 1 | 2D | Detecting contamination sources from proximity readings |
-| 2 | 2D | Maximising a noisy log-likelihood score |
-| 3 | 3D | Minimising side effects across three drug compounds (framed as maximisation) |
-| 4 | 4D | Warehouse placement optimisation via ML-approximated hyperparameters |
-| 5 | 4D | Maximising yield in a unimodal chemical process |
-| 6 | 5D | Optimising a cake recipe across five ingredients |
-| 7 | 6D | Tuning six ML hyperparameters for model performance |
-| 8 | 8D | Tuning eight ML hyperparameters for validation accuracy |
+**Output:** a single scalar score returned after the query is processed, representing the (noisy) value of the true, hidden function evaluated at the submitted input. This is stored alongside the corresponding input as one row of accumulated data per function.
 
-Each function takes an n-dimensional input (values between 0 and 1) and returns a single scalar output to be maximised. All functions started with a baseline dataset that scales with dimensionality — lower-dimensional functions started with fewer points, higher-dimensional functions with more, since higher-dimensional spaces need more initial coverage to be usable at all.
+**Data storage:** each function's full history of (input, output) pairs is stored as a pair of NumPy arrays - `inputs.npy` (shape: `n_points × n_dims`) and `outputs.npy` (shape: `n_points`) - with row `i` of the inputs always corresponding to element `i` of the outputs.
 
-## Inputs and outputs
+## Section 3: Challenge objectives
 
-**Input:** for each function, a query point `x1-x2-...-xn`, where each value is between 0 and 1, specified to six decimal places, and `n` matches that function's dimensionality (2 to 8).
+The objective across all eight functions is **maximisation** - for each function, the goal is to find the input that produces the highest possible output score. (Some functions represent real-world problems that are naturally framed as minimisation, such as minimising side effects in a drug discovery scenario or minimising negative-scored recipe attributes, but these are transformed into maximisation problems, e.g. by taking the negative of the original quantity.)
 
-**Output:** a single scalar score returned by the portal after processing, representing the (noisy) value of the true function at the submitted point.
+The key constraints shaping the strategy are:
 
-**Data storage:** each function's accumulated history is stored as a pair of NumPy arrays — `inputs.npy` (shape: `n_points × n_dims`) and `outputs.npy` (shape: `n_points`) — with row `i` of the inputs corresponding to element `i` of the outputs.
+- **Query budget:** only one new query per function is allowed each week, across 13 rounds total - there's no room to "waste" a query on a clearly uninformative point.
+- **Response delay:** results aren't immediate - each week's query is processed and returned the following week, meaning strategy has to be decided with only the data available at that point, not adjusted mid-week based on partial feedback.
+- **Unknown function structure:** the functions' true forms are completely hidden. I know only high-level context (e.g. "this represents a chemical yield process, typically unimodal" or "this is a multi-modal, noisy log-likelihood surface"), which informs modelling choices (like kernel smoothness assumptions) but not the actual shape.
+- **Increasing dimensionality:** as dimensionality grows (from 2D up to 8D), the same number of data points covers a proportionally tiny fraction of the space (the "curse of dimensionality"), which fundamentally limits how confident any model can be in the higher-dimensional functions this early in the process.
 
-## Technical approach
+## Section 4: Technical approach
 
-### 1. Surrogate modelling with Gaussian Processes
+*(This section is a living record, updated as my approach evolves each round.)*
 
-Since each function is expensive to evaluate (one query per week), I use a **Gaussian Process (GP)** as a surrogate model — a cheap, probabilistic stand-in for the true function. Given the points evaluated so far, the GP produces two things at any candidate input: a predicted value (posterior mean) and an uncertainty estimate (posterior standard deviation). I use `scikit-learn`'s `GaussianProcessRegressor` with a combined RBF + WhiteKernel, which lets the model account for both smooth structure in the function and observation noise.
+### Core method: Gaussian Process surrogate + UCB acquisition
 
-### 2. Acquisition function: Upper Confidence Bound (UCB)
+My core approach uses a **Gaussian Process (GP)** as a surrogate model for each unknown function. Given the points evaluated so far, the GP provides both a predicted value (posterior mean) and an uncertainty estimate (posterior standard deviation) at any candidate input - implemented via `scikit-learn`'s `GaussianProcessRegressor`, using a combined RBF + WhiteKernel to capture both smooth structure and observation noise.
 
-Rather than trusting the GP's prediction blindly, I select the next query point using an **acquisition function** — a rule that scores every candidate point by combining the GP's prediction and its uncertainty:
+To choose each week's query point, I use the **Upper Confidence Bound (UCB)** acquisition function:
 
 ```
 UCB(x) = predicted_mean(x) + β × predicted_std(x)
 ```
 
-The `β` parameter controls the exploration/exploitation trade-off: a higher β favours points the model is uncertain about (exploration); a lower β favours points the model already predicts will score well (exploitation).
+where `β` controls the exploration/exploitation balance - higher values favour uncertain regions (exploration), lower values favour regions already predicted to score well (exploitation). For lower-dimensional functions I search a dense grid of candidate points; for higher-dimensional functions, a dense grid becomes computationally infeasible, so I instead sample tens of thousands of random candidates and select the best-scoring one.
 
-### 3. Candidate search strategy
+### How this has evolved across my first three rounds
 
-For lower-dimensional functions (≤3D), I evaluate the acquisition function over a dense grid covering the input space. For higher-dimensional functions, a dense grid becomes computationally infeasible (grid size grows exponentially with dimensionality — the "curse of dimensionality"), so I instead sample tens of thousands of random candidate points and select the best-scoring one.
+- **Round 1:** a neutral starting point - standard UCB, no bias toward exploration or exploitation, since I had no prior signal from my own submissions yet.
+- **Round 2:** with only 10-11 points per function, I judged the GP's predictions too unreliable to trust, so I deliberately shifted toward exploration - raising β and widening the kernel's length-scale bounds - to prioritise mapping out each function more broadly before narrowing in.
+- **Round 3:** moved to a **per-function β** rather than one fixed value. For lower-dimensional functions, where the posterior mean is starting to look more stable between rounds, I eased β back down toward exploitation. For higher-dimensional functions, which remain sparsely covered even as total point counts grow, I kept β high to continue prioritising exploration there.
 
-### 4. Adapting strategy round by round
+### Where SVMs, regression, and other techniques fit in
 
-My strategy has evolved as the dataset has grown:
+Reflecting on the broader ML toolkit covered in this programme:
 
-- **Round 1:** neutral UCB (β≈2), no prior signal to lean on.
-- **Round 2:** shifted heavily toward exploration (higher β, wider kernel bounds), since early data was too sparse to trust the model's predictions.
-- **Round 3:** moved to a **per-function β**, easing exploration for lower-dimensional functions (where the GP's predictions are starting to stabilise) while keeping exploration high for higher-dimensional functions, which remain sparsely covered even as the total point count grows.
+- **Linear/logistic regression** would struggle here - the response surfaces are clearly non-linear and often multi-modal, and with as few as a dozen points across up to 8 dimensions, there isn't enough data per parameter to fit a stable regression model. That said, regression's interpretability (a direct coefficient per input) is something my current GP-based approach lacks, and is a trade-off worth keeping in mind.
+- **Support Vector Machines**, specifically a soft-margin, kernel (RBF) SVM, are a promising direction I'm considering for future rounds: rather than predicting an exact output value, a classifier could distinguish "high-performing" from "low-performing" regions of the input space. This could offer a faster, more interpretable way to triage which regions are worth exploring before running the full GP + UCB pipeline - particularly valuable as dimensionality increases and the candidate space becomes sparser relative to available data.
 
-### 5. Connecting to regression and SVMs
+### What makes this approach thoughtful (and where it's still limited)
 
-This module's coursework on linear/logistic regression and SVMs prompted a critical look at whether simpler models could apply here:
+The main thing I'd highlight is treating exploration/exploitation balance as a **per-function, evolving decision** rather than a fixed setting applied uniformly - since each function's dimensionality and data coverage genuinely differ, applying the same β everywhere would ignore information I actually have available.
 
-- **Linear/logistic regression** would violate core assumptions in this setting — the response surfaces are non-linear and often multi-modal, and with as few as 12 points across up to 8 dimensions, there isn't enough data per parameter to fit a stable regression. That said, regression's interpretability (a clear coefficient per input) is something the GP-based approach lacks.
-- **Support Vector Machines**, particularly a soft-margin, kernel (RBF) SVM, offer a promising alternative framing: rather than predicting an exact output value, a classifier could distinguish "high-performing" from "low-performing" regions of the input space, offering a faster, more interpretable way to triage where to search before running the full GP + UCB pipeline — especially valuable as dimensionality (and candidate sparsity) increases.
-
-## Repository structure
-
-```
-capstone_project/
-├── initial_data/
-│   ├── function_1/
-│   │   ├── inputs.npy
-│   │   └── outputs.npy
-│   ├── function_2/
-│   ...
-│   └── function_8/
-├── append_weekly_data.py     # appends each week's new (input, output) pair per function
-├── dedupe_function_data.py   # one-time cleanup for accidental duplicate rows
-├── compute_all_queries.py    # fits GP + runs UCB acquisition, proposes next query per function
-└── README.md
-```
-
-## How to reproduce
-
-1. Ensure `initial_data/function_1` through `function_8` each contain an `inputs.npy` and `outputs.npy` file.
-2. After receiving each week's result, update `append_weekly_data.py` with the new (input, output) pair and run it to append the new data point.
-3. Run `compute_all_queries.py` to fit a GP to the current dataset for each function and print the next recommended query point, formatted for direct submission to the course portal.
-4. Submit the printed query points and repeat weekly as new data arrives.
-
-## Requirements
-
-```
-numpy
-scikit-learn
-```
-
-## Notes on interpretability and limitations
-
-As the dataset grows, the main limitation remains **dimensionality-dependent sparsity**: even as point counts increase, higher-dimensional functions (6D, 8D) remain far less thoroughly covered relative to their space than the lower-dimensional functions. No individual dimension has yet emerged as clearly irrelevant, though examining the GP's fitted kernel length-scales per dimension is a natural next step — a very large fitted length-scale for a given input would suggest the output is relatively insensitive to that dimension.
+The clearest current limitation is dimensionality-dependent sparsity: even as total data grows, higher-dimensional functions remain far less thoroughly covered relative to their space than lower-dimensional ones, which keeps the acquisition function close to "explore broadly" almost regardless of β in those cases. I also haven't yet identified any input dimension as clearly irrelevant - a natural next step would be examining the GP's fitted per-dimension length-scales, where a very large fitted length-scale would suggest low sensitivity to that particular input.
